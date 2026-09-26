@@ -1,0 +1,22 @@
+{
+  "dataset": "KeyRecs (DOI: 10.5281/zenodo.7886743)",
+  "mode": "mixed",
+  "window_size": 60,
+  "n_users": 25,
+  "mean_eer": 0.3422,
+  "std_eer": 0.1166,
+  "pooled_eer": 0.3738,
+  "pooled_eer_threshold": 0.1344,
+  "mean_far_at_lock": 0.0616,
+  "mean_frr_at_lock": 0.79,
+  "targets": {
+    "FAR": 0.05,
+    "FRR": 0.1,
+    "EER": 0.08
+  },
+  "targets_met": {
+    "FAR": false,
+    "FRR": false,
+    "EER": false
+  }
+}

@@ -1,0 +1,13 @@
+flask==3.0.3
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.4.2
+joblib==1.4.2
+pyotp==2.9.0
+qrcode==7.4.2
+Pillow==10.3.0
+werkzeug==3.0.3
+pytest==8.2.0
+matplotlib>=3.8.0
+# Optional, only for the impostor-typing bot in ../Keystroke/Key.py:
+# selenium>=4.20.0

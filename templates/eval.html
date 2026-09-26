@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Evaluation Capture{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h2>Evaluation Data Capture</h2>
+  <p>Collect labelled typing windows for the live FAR/FRR evaluation protocol.
+     Every <strong>{{ window_size }} keystrokes</strong> are automatically stored under the
+     selected label. Then run <code>python live_eval.py {{ user.username }}</code>.</p>
+</div>
+
+<div class="dashboard-grid">
+  <div class="card monitor-card">
+    <h3>1. Choose a Label</h3>
+    <p class="hint">
+      <strong>genuine</strong> = your own normal typing (for FRR).<br>
+      <strong>impostor_*</strong> = a different behaviour you impersonate, e.g.
+      <em>impostor_fast</em>, <em>impostor_slow</em>, <em>impostor_huntpeck</em>,
+      <em>impostor_lefthand</em>, <em>bot</em> (for FAR).
+    </p>
+    <div class="form-group">
+      <select id="label-select" class="form-input">
+        <option value="genuine">genuine</option>
+        <option value="impostor_fast">impostor_fast</option>
+        <option value="impostor_slow">impostor_slow</option>
+        <option value="impostor_huntpeck">impostor_huntpeck</option>
+        <option value="impostor_lefthand">impostor_lefthand</option>
+        <option value="bot">bot</option>
+        <option value="custom">custom…</option>
+      </select>
+      <input type="text" id="label-custom" class="form-input hidden"
+             placeholder="custom label, e.g. impostor_oneword" style="margin-top:.5rem"/>
+    </div>
+
+    <h3 style="margin-top:1rem">2. Type in This Box</h3>
+    <textarea id="eval-text" rows="8"
+              placeholder="Type here — every {{ window_size }} keystrokes are saved under the chosen label..."
+              spellcheck="false"></textarea>
+    <p class="hint" style="margin-top:.3rem">
+      Keystrokes: <strong id="key-count">0</strong> |
+      Windows saved this visit: <strong id="saved-count">0</strong>
+    </p>
+    <button class="btn btn-danger" onclick="resetSamples()" style="margin-top:.6rem">
+      🗑 Delete ALL collected evaluation samples
+    </button>
+    <div id="eval-msg" class="enrol-msg"></div>
+  </div>
+
+  <div class="card">
+    <h3>Collected Samples</h3>
+    <div id="counts-box">
+      {% if counts %}
+        {% for label, n in counts.items() %}
+          <div class="score-row"><span class="score-label">{{ label }}</span>
+          <span class="score-val">{{ n }} windows</span></div>
+        {% endfor %}
+      {% else %}
+        <p class="hint">No samples yet. Start typing above.</p>
+      {% endif %}
+    </div>
+    <h3 style="margin-top:1rem">Protocol</h3>
+    <p class="hint">
+      1. Collect ≥ 10 <strong>genuine</strong> windows (type naturally).<br>
+      2. Switch label, collect ≥ 10 windows per <strong>impostor</strong> behaviour
+         (5–6 different behaviours).<br>
+      3. For the <strong>bot</strong> label, run <code>python Keystroke/Key.py</code>
+         pointed at this page.<br>
+      4. Run <code>python live_eval.py {{ user.username }}</code> to compute FAR/FRR/EER.
+    </p>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let savedThisVisit = 0;
+const textarea = document.getElementById("eval-text");
+
+function currentLabel() {
+  const sel = document.getElementById("label-select").value;
+  if (sel === "custom") {
+    return document.getElementById("label-custom").value.trim() || "custom";
+  }
+  return sel;
+}
+
+document.getElementById("label-select").addEventListener("change", (e) => {
+  document.getElementById("label-custom").classList.toggle("hidden", e.target.value !== "custom");
+});
+
+const capture = new KeystrokeCapture({
+  windowSize: {{ window_size }},
+  onWindow: async (events) => {
+    const label = currentLabel();
+    try {
+      const r = await fetch("/eval/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ events, label })
+      });
+      const d = await r.json();
+      if (d.error) { showMsg("❌ " + d.error, "error"); return; }
+      savedThisVisit += d.added;
+      document.getElementById("saved-count").textContent = savedThisVisit;
+      showMsg("✅ Saved " + d.added + " window(s) as '" + label + "'.", "success");
+      renderCounts(d.counts);
+    } catch (e) { console.error(e); }
+  }
+});
+capture.attach(textarea);
+
+setInterval(() => {
+  document.getElementById("key-count").textContent = capture.totalKeys;
+}, 200);
+
+function renderCounts(counts) {
+  const box = document.getElementById("counts-box");
+  let html = "";
+  for (const [label, n] of Object.entries(counts)) {
+    html += `<div class="score-row"><span class="score-label">${label}</span>
+             <span class="score-val">${n} windows</span></div>`;
+  }
+  box.innerHTML = html || '<p class="hint">No samples yet.</p>';
+}
+
+async function resetSamples() {
+  if (!confirm("Delete ALL evaluation samples for your account?")) return;
+  await fetch("/eval/reset", { method: "POST" });
+  savedThisVisit = 0;
+  document.getElementById("saved-count").textContent = 0;
+  renderCounts({});
+  showMsg("🗑 All evaluation samples deleted.", "warn");
+}
+
+function showMsg(msg, type) {
+  const el = document.getElementById("eval-msg");
+  el.textContent = msg;
+  el.className = "enrol-msg msg-" + type;
+}
+</script>
+{% endblock %}

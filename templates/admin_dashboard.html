@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% block title %}Admin Dashboard{% endblock %}
+{% block head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="admin-header">
+  <div class="admin-header-text">
+    <h2>⚙ Admin Dashboard</h2>
+    <p>System-wide user management and behavioural anomaly monitoring</p>
+  </div>
+</div>
+
+<!-- Stats Grid -->
+<div class="admin-stats-grid">
+  <div class="stat-card stat-card-users">
+    <div class="stat-icon">👥</div>
+    <div class="stat-content">
+      <div class="stat-value" id="stat-total-users">{{ stats.total_users }}</div>
+      <div class="stat-label">Total Users</div>
+    </div>
+    <div class="stat-accent"></div>
+  </div>
+  <div class="stat-card stat-card-enrolled">
+    <div class="stat-icon">✅</div>
+    <div class="stat-content">
+      <div class="stat-value" id="stat-enrolled">{{ stats.enrolled_users }}</div>
+      <div class="stat-label">Enrolled Users</div>
+    </div>
+    <div class="stat-accent"></div>
+  </div>
+  <div class="stat-card stat-card-anomalies">
+    <div class="stat-icon">⚠️</div>
+    <div class="stat-content">
+      <div class="stat-value" id="stat-anomalies">{{ stats.anomalies_24h }}</div>
+      <div class="stat-label">Anomalies (24h)</div>
+    </div>
+    <div class="stat-accent"></div>
+  </div>
+  <div class="stat-card stat-card-mfa">
+    <div class="stat-icon">🔐</div>
+    <div class="stat-content">
+      <div class="stat-value" id="stat-mfa">{{ stats.mfa_triggers_24h }}</div>
+      <div class="stat-label">MFA Triggers (24h)</div>
+    </div>
+    <div class="stat-accent"></div>
+  </div>
+</div>
+
+<!-- Main Content Grid -->
+<div class="admin-main-grid">
+
+  <!-- Users Table -->
+  <div class="card admin-users-card">
+    <div class="card-header-row">
+      <h3>User Management</h3>
+      <span class="admin-count-badge">{{ users|length }} users</span>
+    </div>
+    <div class="admin-table-wrap">
+      <table class="admin-table" id="users-table">
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Status</th>
+            <th>Events</th>
+            <th>Anomalies</th>
+            <th>Last Active</th>
+            <th>Role</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in users %}
+          <tr class="{% if u.anomaly_count > 5 %}row-highlight-danger{% elif u.anomaly_count > 0 %}row-highlight-warn{% endif %}">
+            <td>
+              <a href="{{ url_for('admin_user_detail', uid=u.id) }}" class="user-link">
+                <span class="user-avatar">{{ u.username[0]|upper }}</span>
+                <span>{{ u.username }}</span>
+              </a>
+            </td>
+            <td>
+              {% if u.enrolled %}
+                <span class="status-badge status-enrolled">Enrolled</span>
+              {% else %}
+                <span class="status-badge status-pending">Pending</span>
+              {% endif %}
+            </td>
+            <td>{{ u.total_events }}</td>
+            <td>
+              {% if u.anomaly_count > 0 %}
+                <span class="anomaly-count anomaly-count-{{ 'high' if u.anomaly_count > 5 else 'medium' if u.anomaly_count > 2 else 'low' }}">
+                  {{ u.anomaly_count }}
+                </span>
+              {% else %}
+                <span class="anomaly-count anomaly-count-none">0</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if u.last_activity %}
+                <span class="last-active" title="{{ u.last_activity }}">
+                  <script>
+                    document.currentScript.parentElement.textContent = new Date({{ u.last_activity }} * 1000).toLocaleString();
+                  </script>
+                </span>
+              {% else %}
+                <span class="text-muted">Never</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if u.is_admin %}
+                <span class="role-badge role-admin">Admin</span>
+              {% else %}
+                <span class="role-badge role-user">User</span>
+              {% endif %}
+            </td>
+            <td class="action-cell">
+              <a href="{{ url_for('admin_user_detail', uid=u.id) }}" class="btn-action btn-action-view" title="View Details">👁</a>
+              {% if u.id != user.id %}
+              <form method="POST" action="{{ url_for('admin_toggle_admin', uid=u.id) }}" class="inline-form">
+                <button type="submit" class="btn-action btn-action-role" title="{{ 'Demote from Admin' if u.is_admin else 'Promote to Admin' }}">
+                  {{ '⬇' if u.is_admin else '⬆' }}
+                </button>
+              </form>
+              <button type="button" class="btn-action btn-action-delete" title="Delete User" onclick="showDeleteModal({{ u.id }}, '{{ u.username }}')">🗑</button>
+              {% else %}
+              <span class="btn-action btn-action-locked" title="Current Account (Protected)">🔒</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Delete Confirmation Modal -->
+  <div id="delete-user-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-icon-danger">🗑️</div>
+      <h3 id="delete-modal-title">Delete User Account</h3>
+      <p id="delete-modal-desc">Are you sure you want to permanently delete this user?</p>
+      <p class="modal-subtext">All enrolled behavioural models, keystroke samples, and event history will be purged.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" onclick="hideDeleteModal()">Cancel</button>
+        <form id="delete-modal-form" method="POST" action="" class="inline-form">
+          <button type="submit" class="btn btn-danger">Yes, Permanently Delete</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Anomaly Feed -->
+  <div class="card admin-anomaly-card">
+    <div class="card-header-row">
+      <h3>Recent Anomaly Feed</h3>
+      <span class="feed-live-indicator" id="feed-live">● LIVE</span>
+    </div>
+    <div class="anomaly-feed" id="anomaly-feed">
+      {% if anomalies %}
+        {% for ev in anomalies %}
+        <a href="{{ url_for('admin_user_detail', uid=ev.user_id) }}" class="anomaly-entry anomaly-{{ ev.event_type }}" title="View analysis for {{ ev.username }}">
+          <div class="anomaly-icon">
+            {% if ev.event_type == 'mfa_trigger' %}🔐
+            {% elif ev.event_type == 'session_lock' %}🔒
+            {% elif ev.event_type == 'warning' %}⚠️
+            {% elif ev.event_type == 'mfa_fail' %}❌
+            {% elif ev.event_type == 'mfa_pass' %}✅
+            {% endif %}
+          </div>
+          <div class="anomaly-content">
+            <div class="anomaly-main">
+              <span class="anomaly-user">{{ ev.username }}</span>
+              <span class="anomaly-type">{{ ev.event_type.replace('_', ' ')|upper }}</span>
+              <span class="anomaly-arrow">→</span>
+            </div>
+            <div class="anomaly-meta">
+              {% if ev.trust_score %}<span class="anomaly-score">Score: {{ "%.3f"|format(ev.trust_score) }}</span>{% endif %}
+              <span class="anomaly-time">
+                <script>
+                  document.currentScript.parentElement.textContent = new Date({{ ev.timestamp }} * 1000).toLocaleString();
+                </script>
+              </span>
+            </div>
+          </div>
+        </a>
+        {% endfor %}
+      {% else %}
+        <div class="anomaly-empty">
+          <div class="anomaly-empty-icon">🛡️</div>
+          <p>No anomalies detected. All systems nominal.</p>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+<!-- Anomaly Timeline Chart -->
+<div class="card admin-chart-card">
+  <h3>Anomaly Timeline (Last 24 Hours)</h3>
+  <canvas id="anomaly-timeline-chart" height="80"></canvas>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/admin.js') }}"></script>
+<script>
+  // Initialize anomaly timeline chart
+  const anomalyData = {{ anomalies|tojson }};
+  initAnomalyTimeline(anomalyData);
+
+  // Auto-refresh anomaly feed
+  startAnomalyFeedRefresh();
+</script>
+{% endblock %}

@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}Enrolment{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h2>Keystroke Enrolment</h2>
+  <p>Build your typing profile in two steps. Each submission is split into
+     <strong>windows of {{ config.WINDOW_SIZE }} keystrokes</strong> — the same windows used during
+     live monitoring, so your model learns exactly what it will see later.</p>
+</div>
+
+<div class="enrol-layout">
+  <div class="card status-card">
+    <h3>Enrolment Status</h3>
+    {% if user.enrolled %}
+      <div class="badge badge-green">✅ Enrolled & Trained</div>
+    {% else %}
+      <div class="badge badge-amber">⏳ Not Yet Enrolled</div>
+    {% endif %}
+
+    <div class="progress-section">
+      <div class="progress-label">
+        Windows collected: <span id="n-done">{{ n_windows }}</span> / {{ target }}
+        <br>Free-text windows: <span id="n-free">{{ n_free }}</span>
+        {% if require_free %}(at least {{ free_target }} required){% endif %}
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progress-fill" style="width:{{ progress }}%"></div>
+      </div>
+      <div class="progress-pct" id="progress-pct">{{ progress }}%</div>
+    </div>
+
+    <div class="enrol-btns">
+      <button id="btn-train" class="btn btn-primary" onclick="trainModel()"
+              {% if n_windows < target or (require_free and n_free < free_target) %}disabled{% endif %}>
+        🧠 Train Models
+      </button>
+      <button class="btn btn-danger" onclick="resetEnrolment()">🗑 Reset</button>
+    </div>
+    <div id="enrol-msg" class="enrol-msg"></div>
+  </div>
+
+  <div class="card typing-card">
+    <h3>Step 1 — Fixed Passage (type it ~{{ n_passages }} times)</h3>
+    <div class="passage-box" id="passage-box">{{ enrol_text }}</div>
+
+    <p class="hint">Copy the text above by typing it in the box below. Don't copy-paste.
+       Use several natural sessions; the profile should include normal and slightly slower typing.</p>
+    <textarea id="typing-area" rows="5" placeholder="Start typing the passage here..."
+              spellcheck="false" autocomplete="off"></textarea>
+
+    <div style="display:flex; gap:.8rem; margin-top:.8rem;">
+      <button class="btn btn-primary" onclick="submitFixed()">✅ Submit Passage</button>
+      <button class="btn btn-secondary" onclick="clearFixed()">🔄 Clear & Retry</button>
+    </div>
+    <p class="hint" style="margin-top:.5rem">
+      Keystrokes captured: <strong id="key-count">0</strong>
+    </p>
+  </div>
+
+  <div class="card typing-card">
+    <h3>Step 2 — Free Text (type naturally across several sessions)</h3>
+    <p class="hint">Type freely — an email, a story, your thoughts. This teaches the model
+       your <em>natural</em> typing rhythm, reducing false rejections during real sessions
+       (fixed-text-only training is a known weakness of keystroke systems).</p>
+    <textarea id="free-area" rows="5" placeholder="Type anything here, naturally..."
+              spellcheck="false" autocomplete="off"></textarea>
+    <div style="display:flex; gap:.8rem; margin-top:.8rem;">
+      <button class="btn btn-primary" onclick="submitFree()">✅ Submit Free Text</button>
+      <button class="btn btn-secondary" onclick="clearFree()">🔄 Clear</button>
+    </div>
+    <p class="hint" style="margin-top:.5rem">
+      Keystrokes captured: <strong id="free-key-count">0</strong>
+    </p>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const TARGET = {{ target }};
+const REQUIRE_FREE = {{ 'true' if require_free else 'false' }};
+const FREE_TARGET = {{ free_target }};
+const WINDOW_SIZE = {{ config.WINDOW_SIZE }};
+
+// ── Fixed passage capture (manual submit, no auto-window) ────────────────────
+const fixedCapture = new KeystrokeCapture({ windowSize: 9999 });
+const fixedArea = document.getElementById("typing-area");
+fixedCapture.attach(fixedArea);
+
+// ── Free-text capture ────────────────────────────────────────────────────────
+const freeCapture = new KeystrokeCapture({ windowSize: 9999 });
+const freeArea = document.getElementById("free-area");
+freeCapture.attach(freeArea);
+
+setInterval(() => {
+  document.getElementById("key-count").textContent = fixedCapture.totalKeys;
+  document.getElementById("free-key-count").textContent = freeCapture.totalKeys;
+}, 200);
+
+async function submitEvents(events, passageType) {
+  const r = await fetch("/enrol/submit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ events, passage_type: passageType, passage_num: 0 })
+  });
+  return await r.json();
+}
+
+function updateProgress(d) {
+  document.getElementById("n-done").textContent = d.n;
+  document.getElementById("n-free").textContent = d.n_free;
+  document.getElementById("progress-fill").style.width = d.pct + "%";
+  document.getElementById("progress-pct").textContent = d.pct + "%";
+  if (d.n >= TARGET && (!REQUIRE_FREE || d.n_free >= FREE_TARGET)) {
+    document.getElementById("btn-train").disabled = false;
+  }
+}
+
+async function submitFixed() {
+  const events = fixedCapture.flush();
+  if (events.length < WINDOW_SIZE) {
+    showMsg("⚠️ Too few keystrokes (" + events.length + "). Type the full passage.", "warn");
+    return;
+  }
+  showMsg("⏳ Submitting passage...", "info");
+  const d = await submitEvents(events, "fixed");
+  if (d.error) { showMsg("❌ " + d.error, "error"); return; }
+  updateProgress(d);
+  showMsg("✅ Passage saved as " + d.windows_added + " windows (" + d.n + "/" + TARGET + ").", "success");
+  clearFixed();
+}
+
+async function submitFree() {
+  const events = freeCapture.flush();
+  if (events.length < WINDOW_SIZE) {
+    showMsg("⚠️ Too few keystrokes (" + events.length + "). Type at least " + WINDOW_SIZE + " keys.", "warn");
+    return;
+  }
+  showMsg("⏳ Submitting free text...", "info");
+  const d = await submitEvents(events, "free");
+  if (d.error) { showMsg("❌ " + d.error, "error"); return; }
+  updateProgress(d);
+  showMsg("✅ Free text saved as " + d.windows_added + " windows.", "success");
+  clearFree();
+}
+
+function clearFixed() { fixedArea.value = ""; fixedCapture.reset(); fixedArea.focus(); }
+function clearFree()  { freeArea.value = "";  freeCapture.reset();  freeArea.focus(); }
+
+async function trainModel() {
+  showMsg("⏳ Training models... this may take a few seconds.", "info");
+  const r = await fetch("/enrol/train", { method: "POST" });
+  const d = await r.json();
+
+  if (d.error) { showMsg("❌ " + d.error, "error"); return; }
+
+  const t = d.result.thresholds;
+  showMsg(`✅ Models trained using ${d.result.n_total} windows (${d.result.n_vectors} training, ${d.result.n_calibration} validation). ` +
+          `IF normal: ${d.result.if_normal_pct}% | SVM normal: ${d.result.svm_normal_pct}% | ` +
+          `thresholds: lock=${t.lock} warn=${t.warn} good=${t.good}`, "success");
+  setTimeout(() => window.location.href = "/dashboard", 2500);
+}
+
+async function resetEnrolment() {
+  if (!confirm("Delete all enrolment data and retrain?")) return;
+  await fetch("/enrol/reset", { method: "POST" });
+  location.reload();
+}
+
+function showMsg(msg, type) {
+  const el = document.getElementById("enrol-msg");
+  el.textContent = msg;
+  el.className = "enrol-msg msg-" + type;
+}
+</script>
+{% endblock %}

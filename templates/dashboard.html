@@ -1,0 +1,313 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<!-- MFA Overlay -->
+<div id="mfa-overlay" class="mfa-overlay hidden">
+  <div class="mfa-modal">
+    <div class="mfa-icon">🔐</div>
+    <h3>Identity Verification Required</h3>
+    <p>Your typing pattern has deviated from your enrolled profile.<br>
+       Enter your 6-digit authenticator code to prove your identity.</p>
+    <input type="text" id="mfa-code" maxlength="6" placeholder="000000"
+           inputmode="numeric" pattern="[0-9]{6}"/>
+    <div id="mfa-result" class="mfa-result"></div>
+    <button class="btn btn-primary" onclick="submitMFA()">Verify Identity</button>
+  </div>
+</div>
+
+<div class="page-header">
+  <h2>Continuous Authentication Monitor</h2>
+  <p>After login, your typing behaviour is continuously verified. If someone else types on your session, the system will detect it and lock the session.</p>
+</div>
+
+<div class="dashboard-grid">
+
+  <!-- Trust Gauge -->
+  <div class="card gauge-card">
+    <h3>Trust Score</h3>
+    <div class="gauge-wrap">
+      <canvas id="gauge-canvas" width="220" height="220"></canvas>
+      <div class="gauge-value" id="gauge-value">—</div>
+      <div class="gauge-label" id="gauge-label">NOT YET SCORED</div>
+    </div>
+    <div id="level-badge" class="level-badge level-warn">● WAITING FOR PROFILE</div>
+    <div class="score-row">
+      <div class="score-item">
+        <span class="score-label">Isolation Forest</span>
+        <span class="score-val" id="if-score">—</span>
+      </div>
+      <div class="score-item">
+        <span class="score-label">One-Class SVM</span>
+        <span class="score-val" id="svm-score">—</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session area -->
+  <div class="card monitor-card">
+    <h3>Session Controls</h3>
+    {% if user.enrolled and profile_ready %}
+      <div class="monitor-btns">
+        <button id="btn-start" class="btn btn-primary" onclick="startMonitor()">▶ Start Monitoring</button>
+        <button id="btn-stop"  class="btn btn-secondary" onclick="stopMonitor()" disabled>⏹ Stop</button>
+      </div>
+    {% else %}
+      <a href="{{ url_for('enrol') }}" class="btn btn-primary">{% if user.enrolled %}Retrain Updated Profile →{% else %}Complete Enrolment First →{% endif %}</a>
+    {% endif %}
+    <div id="monitor-status" class="monitor-status">{% if user.enrolled and not profile_ready %}⚠️ Your profile uses an older calibration. Reset enrolment and train a new profile before monitoring.{% else %}Not monitoring.{% endif %}</div>
+
+    <h3 style="margin-top:1.2rem">Type Here — Your Identity Is Being Verified</h3>
+    <p class="hint">Type naturally. Every {{ config.WINDOW_SIZE if config else 30 }} keystrokes, your typing pattern is compared against your enrolled profile.</p>
+    <textarea id="session-text" rows="8"
+              placeholder="Type anything here while monitoring is active..."
+              spellcheck="false" disabled></textarea>
+    <p class="hint" style="margin-top:.3rem">
+      Keystrokes: <strong id="key-count">0</strong> |
+      Windows scored: <strong id="window-count">0</strong>
+    </p>
+
+    <div class="tip" style="margin-top:1rem; padding:.8rem; background:rgba(99,102,241,.08); border-radius:8px; border-left:3px solid #6366f1;">
+      <p style="color:#818cf8; font-size:.85rem; margin:0;">
+        💡 <strong>To test impostor detection:</strong> Have a friend type in this box while monitoring is active.
+        Their typing rhythm should differ from yours, causing the trust score to drop and trigger MFA.
+      </p>
+    </div>
+  </div>
+
+  <!-- Chart -->
+  <div class="card chart-card">
+    <h3>Trust Score History</h3>
+    <canvas id="trust-chart" height="120"></canvas>
+  </div>
+
+  <!-- Event Log -->
+  <div class="card events-card">
+    <h3>Authentication Event Log</h3>
+    <div id="event-log" class="event-log">
+      {% for ev in events %}
+        <div class="event-row event-{{ ev.event_type }}">
+          <span class="ev-type">{{ ev.event_type.replace('_',' ').upper() }}</span>
+          {% if ev.trust_score %}<span class="ev-score">{{ "%.3f"|format(ev.trust_score) }}</span>{% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let capture, chart, monitoring = false, windowCount = 0;
+const WINDOW_SIZE = {{ config.WINDOW_SIZE }};
+
+// ── Chart ─────────────────────────────────────────────────────────────────────
+function initChart() {
+  chart = new Chart(document.getElementById("trust-chart").getContext("2d"), {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: [{
+        label: "Trust Score",
+        data: [],
+        borderColor: "#22c55e",
+        backgroundColor: "rgba(34,197,94,0.08)",
+        borderWidth: 2, pointRadius: 3, tension: 0.4, fill: true,
+      }]
+    },
+    options: {
+      animation: false,
+      scales: {
+        y: { min: 0, max: 1, grid: { color: "#2a2a3a" }, ticks: { color: "#aaa" } },
+        x: { display: false }
+      },
+      plugins: { legend: { display: false } }
+    }
+  });
+}
+
+// ── Gauge ─────────────────────────────────────────────────────────────────────
+let TH = { good: 0.58, warn: 0.52, lock: 0.46 };  // updated from server per-user
+
+function drawGauge(score) {
+  const ctx = document.getElementById("gauge-canvas").getContext("2d");
+  const cx = 110, cy = 120, r = 90;
+  ctx.clearRect(0, 0, 220, 220);
+  ctx.beginPath(); ctx.arc(cx, cy, r, Math.PI, 2*Math.PI);
+  ctx.lineWidth = 18; ctx.strokeStyle = "#2a2a3a"; ctx.stroke();
+  const color = score >= TH.good ? "#22c55e" : score >= TH.lock ? "#f59e0b" : "#ef4444";
+  ctx.beginPath(); ctx.arc(cx, cy, r, Math.PI, Math.PI + score * Math.PI);
+  ctx.strokeStyle = color; ctx.lineWidth = 18; ctx.lineCap = "round"; ctx.stroke();
+}
+
+// ── Monitor control ───────────────────────────────────────────────────────────
+function startMonitor() {
+  const textarea = document.getElementById("session-text");
+  textarea.disabled = false;
+  textarea.focus();
+
+  capture = new KeystrokeCapture({
+    windowSize: WINDOW_SIZE,
+    onWindow: async (events) => {
+      // Send keystroke window to server for scoring
+      try {
+        const r = await fetch("/monitor/score", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ events })
+        });
+        const d = await r.json();
+        if (!r.ok || d.error) {
+          const message = d.error || `Scoring request failed (${r.status}).`;
+          document.getElementById("monitor-status").textContent = "⚠️ " + message;
+          console.error(message);
+          return;
+        }
+
+        if (d.thresholds) TH = d.thresholds;
+
+        // Session locked by server: block input and require MFA
+        if (d.locked) {
+          updateUI(d.score, "MFA_REQUIRED", null, null);
+          lockSessionUI();
+          showMFA();
+          return;
+        }
+
+        windowCount++;
+        document.getElementById("window-count").textContent = windowCount;
+        updateUI(d.score, d.level, d.if_score, d.svm_score);
+        if (d.level === "WARMUP") {
+          document.getElementById("monitor-status").textContent =
+            `◌ Building a session baseline — ${d.warmup_remaining} scored window(s) before security decisions.`;
+        } else {
+          document.getElementById("monitor-status").textContent =
+            `🟢 Monitoring active — every ${WINDOW_SIZE} keystrokes your identity is verified.`;
+        }
+        updateChart(d.score);
+        addEventRow(d.level === "MFA_REQUIRED" ? "mfa_trigger" :
+                    d.level === "WARN" ? "warning" : "score_update", d.score);
+
+        if (d.mfa_active) { lockSessionUI(); showMFA(); }
+      } catch (e) { console.error("Score error:", e); }
+    }
+  });
+
+  capture.attach(textarea);
+  monitoring = true;
+  document.getElementById("btn-start").disabled = true;
+  document.getElementById("btn-stop").disabled  = false;
+  document.getElementById("monitor-status").textContent = `🟢 Monitoring active — every ${WINDOW_SIZE} keystrokes your identity is verified.`;
+
+  // Live key counter
+  setInterval(() => {
+    if (capture) document.getElementById("key-count").textContent = capture.totalKeys;
+  }, 200);
+}
+
+function stopMonitor() {
+  if (capture) capture.detach();
+  monitoring = false;
+  document.getElementById("session-text").disabled = true;
+  document.getElementById("btn-start").disabled = false;
+  document.getElementById("btn-stop").disabled  = true;
+  document.getElementById("monitor-status").textContent = "⏹ Monitoring stopped.";
+}
+
+// ── MFA ───────────────────────────────────────────────────────────────────────
+function lockSessionUI() {
+  const ta = document.getElementById("session-text");
+  ta.disabled = true;
+  document.getElementById("monitor-status").textContent =
+    "🔒 SESSION LOCKED — identity verification required. Typing is blocked until MFA passes.";
+}
+
+function unlockSessionUI() {
+  const ta = document.getElementById("session-text");
+  if (monitoring) ta.disabled = false;
+  document.getElementById("monitor-status").textContent =
+    `🟢 Monitoring active — every ${WINDOW_SIZE} keystrokes your identity is verified.`;
+  ta.focus();
+}
+
+function showMFA() {
+  document.getElementById("mfa-overlay").classList.remove("hidden");
+  setTimeout(() => document.getElementById("mfa-code").focus(), 100);
+}
+
+async function submitMFA() {
+  const code = document.getElementById("mfa-code").value.trim();
+  const r = await fetch("/mfa/verify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code })
+  });
+  const d = await r.json();
+  const el = document.getElementById("mfa-result");
+  if (d.status === "pass") {
+    el.textContent = "✅ Identity verified. Session restored.";
+    el.className = "mfa-result mfa-pass";
+    updateUI(d.score, "OK", null, null);
+    addEventRow("session_unlock", d.score);
+    setTimeout(() => {
+      document.getElementById("mfa-overlay").classList.add("hidden");
+      document.getElementById("mfa-code").value = "";
+      el.textContent = "";
+      unlockSessionUI();
+    }, 1500);
+  } else {
+    el.textContent = "❌ Invalid code. Session remains locked.";
+    el.className = "mfa-result mfa-fail";
+    document.getElementById("mfa-code").value = "";
+  }
+}
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function updateUI(score, level, ifS, svmS) {
+  drawGauge(score);
+  document.getElementById("gauge-value").textContent = score.toFixed(3);
+  const badge = document.getElementById("level-badge");
+  const label = document.getElementById("gauge-label");
+  if (level === "WARMUP") {
+    badge.className = "level-badge level-warn"; badge.textContent = "◌ BUILDING SESSION BASELINE";
+    label.textContent = "WARM-UP: NO SECURITY DECISION YET";
+  } else if (level === "OK") {
+    badge.className = "level-badge level-ok"; badge.textContent = "● AUTHENTICATED";
+    label.textContent = "LEGITIMATE USER";
+  } else if (level === "WARN") {
+    badge.className = "level-badge level-warn"; badge.textContent = "⚠ ANOMALY DETECTED";
+    label.textContent = "VERIFYING IDENTITY";
+  } else {
+    badge.className = "level-badge level-mfa"; badge.textContent = "🔐 SESSION LOCKED";
+    label.textContent = "IDENTITY UNVERIFIED";
+  }
+  if (ifS !== null && ifS !== undefined) document.getElementById("if-score").textContent = ifS.toFixed(3);
+  if (svmS !== null && svmS !== undefined) document.getElementById("svm-score").textContent = svmS.toFixed(3);
+}
+
+function updateChart(score) {
+  chart.data.labels.push(new Date().toLocaleTimeString());
+  chart.data.datasets[0].data.push(score);
+  if (chart.data.labels.length > 50) { chart.data.labels.shift(); chart.data.datasets[0].data.shift(); }
+  const c = score >= TH.good ? "#22c55e" : score >= TH.lock ? "#f59e0b" : "#ef4444";
+  chart.data.datasets[0].borderColor = c;
+  chart.update();
+}
+
+function addEventRow(type, score) {
+  const log = document.getElementById("event-log");
+  const row = document.createElement("div");
+  row.className = `event-row event-${type}`;
+  row.innerHTML = `<span class="ev-type">${type.replace(/_/g," ").toUpperCase()}</span>
+                   <span class="ev-score">${score ? score.toFixed(3) : ""}</span>
+                   <span class="ev-time">${new Date().toLocaleTimeString()}</span>`;
+  log.insertBefore(row, log.firstChild);
+  if (log.children.length > 30) log.removeChild(log.lastChild);
+}
+
+window.onload = () => { initChart(); drawGauge(0); };
+</script>
+{% endblock %}

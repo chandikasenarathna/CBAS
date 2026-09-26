@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block title %}User Detail — {{ target.username }}{% endblock %}
+{% block head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="admin-header">
+  <div class="admin-header-text">
+    <a href="{{ url_for('admin_dashboard') }}" class="back-link">← Back to Admin Dashboard</a>
+    <h2>User Analysis — {{ target.username }}</h2>
+    <p>Behavioural pattern analysis and anomaly monitoring</p>
+  </div>
+</div>
+
+<!-- User Info + Pattern Stats -->
+<div class="user-detail-top-grid">
+
+  <!-- User Info Card -->
+  <div class="card user-info-card">
+    <h3>User Profile</h3>
+    <div class="user-profile-row">
+      <div class="user-avatar-lg">{{ target.username[0]|upper }}</div>
+      <div class="user-profile-info">
+        <div class="user-profile-name">{{ target.username }}</div>
+        <div class="user-profile-meta">
+          {% if target.is_admin %}<span class="role-badge role-admin">Admin</span>{% endif %}
+          {% if target.enrolled %}
+            <span class="status-badge status-enrolled">Enrolled</span>
+          {% else %}
+            <span class="status-badge status-pending">Not Enrolled</span>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="user-info-grid">
+      <div class="user-info-item">
+        <span class="info-label">User ID</span>
+        <span class="info-value">#{{ target.id }}</span>
+      </div>
+      <div class="user-info-item">
+        <span class="info-label">Registered</span>
+        <span class="info-value" id="user-registered">
+          {% if target.created_at %}
+          <script>
+            document.currentScript.parentElement.textContent = new Date({{ target.created_at }} * 1000).toLocaleDateString();
+          </script>
+          {% else %}Unknown{% endif %}
+        </span>
+      </div>
+    </div>
+    <div class="user-actions-row">
+      <form method="POST" action="{{ url_for('admin_reset_enrolment', uid=target.id) }}"
+            onsubmit="return confirm('Reset enrolment for {{ target.username }}? This will delete all trained models and require the user to re-enrol.');">
+        <button type="submit" class="btn btn-warning">🔄 Reset Enrolment</button>
+      </form>
+      {% if target.id != user.id %}
+      <form method="POST" action="{{ url_for('admin_toggle_admin', uid=target.id) }}">
+        <button type="submit" class="btn btn-secondary">
+          {{ '⬇ Demote from Admin' if target.is_admin else '⬆ Promote to Admin' }}
+        </button>
+      </form>
+      <button type="button" class="btn btn-danger" onclick="showDeleteModal({{ target.id }}, '{{ target.username }}')">🗑 Delete User</button>
+      {% else %}
+      <button type="button" class="btn btn-secondary" disabled title="Currently logged in as this user">🔒 Current User (Protected)</button>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Delete Confirmation Modal -->
+  <div id="delete-user-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-icon-danger">🗑️</div>
+      <h3 id="delete-modal-title">Delete User Account</h3>
+      <p id="delete-modal-desc">Are you sure you want to permanently delete this user?</p>
+      <p class="modal-subtext">All enrolled behavioural models, keystroke samples, and event history will be purged.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" onclick="hideDeleteModal()">Cancel</button>
+        <form id="delete-modal-form" method="POST" action="" class="inline-form">
+          <button type="submit" class="btn btn-danger">Yes, Permanently Delete</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pattern Analysis Stats -->
+  <div class="card pattern-stats-card">
+    <h3>Pattern Analysis</h3>
+    {% if pattern_stats %}
+    <div class="pattern-stats-grid">
+      <div class="pattern-stat">
+        <div class="pattern-stat-value {% if pattern_stats.avg_score >= 0.6 %}text-green{% elif pattern_stats.avg_score >= 0.45 %}text-amber{% else %}text-red{% endif %}">
+          {{ "%.4f"|format(pattern_stats.avg_score) }}
+        </div>
+        <div class="pattern-stat-label">Avg Trust Score</div>
+      </div>
+      <div class="pattern-stat">
+        <div class="pattern-stat-value text-red">{{ "%.4f"|format(pattern_stats.min_score) }}</div>
+        <div class="pattern-stat-label">Lowest Score</div>
+      </div>
+      <div class="pattern-stat">
+        <div class="pattern-stat-value text-green">{{ "%.4f"|format(pattern_stats.max_score) }}</div>
+        <div class="pattern-stat-label">Highest Score</div>
+      </div>
+      <div class="pattern-stat">
+        <div class="pattern-stat-value">{{ "%.4f"|format(pattern_stats.std_dev) }}</div>
+        <div class="pattern-stat-label">Std Deviation</div>
+      </div>
+      <div class="pattern-stat">
+        <div class="pattern-stat-value">{{ pattern_stats.total_scores }}</div>
+        <div class="pattern-stat-label">Total Scores</div>
+      </div>
+      <div class="pattern-stat">
+        {% set anomaly_rate = (anomaly_summary|sum(attribute='cnt')) / pattern_stats.total_scores * 100 if pattern_stats.total_scores > 0 else 0 %}
+        <div class="pattern-stat-value {% if anomaly_rate > 20 %}text-red{% elif anomaly_rate > 5 %}text-amber{% else %}text-green{% endif %}">
+          {{ "%.1f"|format(anomaly_rate) }}%
+        </div>
+        <div class="pattern-stat-label">Anomaly Rate</div>
+      </div>
+    </div>
+    {% else %}
+    <div class="anomaly-empty">
+      <div class="anomaly-empty-icon">📊</div>
+      <p>No scoring data available for this user yet.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Trust Score Timeline -->
+<div class="card admin-chart-card">
+  <h3>Trust Score Timeline</h3>
+  {% if trust_history %}
+  <canvas id="trust-timeline-chart" height="100"></canvas>
+  {% else %}
+  <div class="anomaly-empty">
+    <div class="anomaly-empty-icon">📈</div>
+    <p>No trust score history available.</p>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Anomaly Breakdown + Event Log Grid -->
+<div class="user-detail-bottom-grid">
+
+  <!-- Anomaly Breakdown -->
+  <div class="card anomaly-breakdown-card">
+    <h3>Anomaly Breakdown</h3>
+    {% if anomaly_summary %}
+    <div class="anomaly-breakdown-list">
+      {% for a in anomaly_summary %}
+      <div class="breakdown-row">
+        <div class="breakdown-icon">
+          {% if a.event_type == 'warning' %}⚠️
+          {% elif a.event_type == 'mfa_trigger' %}🔐
+          {% elif a.event_type == 'session_lock' %}🔒
+          {% elif a.event_type == 'mfa_fail' %}❌
+          {% endif %}
+        </div>
+        <div class="breakdown-info">
+          <div class="breakdown-type">{{ a.event_type.replace('_', ' ')|title }}</div>
+          <div class="breakdown-meta">
+            Avg score: {{ "%.3f"|format(a.avg_score) if a.avg_score else 'N/A' }} ·
+            Min: {{ "%.3f"|format(a.min_score) if a.min_score else 'N/A' }}
+          </div>
+        </div>
+        <div class="breakdown-count">{{ a.cnt }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    <!-- Anomaly Doughnut Chart -->
+    <canvas id="anomaly-doughnut" height="180" style="margin-top: 1rem;"></canvas>
+    {% else %}
+    <div class="anomaly-empty">
+      <div class="anomaly-empty-icon">🛡️</div>
+      <p>No anomalies detected for this user.</p>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Event Log -->
+  <div class="card admin-events-card">
+    <div class="card-header-row">
+      <h3>Event Log</h3>
+      <div class="event-filter-row">
+        <select id="event-filter" class="form-input event-filter-select" onchange="filterEvents(this.value)">
+          <option value="all">All Events</option>
+          <option value="anomaly">Anomalies Only</option>
+          <option value="score_update">Score Updates</option>
+          <option value="warning">Warnings</option>
+          <option value="mfa_trigger">MFA Triggers</option>
+          <option value="session_lock">Session Locks</option>
+        </select>
+      </div>
+    </div>
+    <div class="admin-event-log" id="event-log">
+      {% for ev in events %}
+      <div class="admin-event-row event-type-{{ ev.event_type }}" data-type="{{ ev.event_type }}">
+        <div class="admin-ev-icon">
+          {% if ev.event_type == 'score_update' %}📊
+          {% elif ev.event_type == 'warning' %}⚠️
+          {% elif ev.event_type == 'mfa_trigger' %}🔐
+          {% elif ev.event_type == 'session_lock' %}🔒
+          {% elif ev.event_type == 'mfa_pass' %}✅
+          {% elif ev.event_type == 'mfa_fail' %}❌
+          {% elif ev.event_type == 'model_trained' %}🧠
+          {% elif ev.event_type == 'session_unlock' %}🔓
+          {% else %}📝{% endif %}
+        </div>
+        <div class="admin-ev-content">
+          <span class="admin-ev-type">{{ ev.event_type.replace('_', ' ')|upper }}</span>
+          {% if ev.trust_score %}<span class="admin-ev-score">{{ "%.3f"|format(ev.trust_score) }}</span>{% endif %}
+        </div>
+        <div class="admin-ev-time">
+          <script>
+            document.currentScript.parentElement.textContent = new Date({{ ev.timestamp }} * 1000).toLocaleString();
+          </script>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/admin.js') }}"></script>
+<script>
+  // Trust timeline chart
+  {% if trust_history %}
+  const trustData = {{ trust_history|tojson }};
+  initUserTrustTimeline(trustData);
+  {% endif %}
+
+  // Anomaly doughnut chart
+  {% if anomaly_summary %}
+  const anomalySummary = {{ anomaly_summary|tojson }};
+  initAnomalyDoughnut(anomalySummary);
+  {% endif %}
+</script>
+{% endblock %}
